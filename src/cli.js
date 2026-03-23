@@ -178,6 +178,32 @@ async function main() {
       break;
     }
 
+    case 'get': {
+      const vaultKey = getVaultKey();
+      const env = getEnvironment();
+      const vaultUrl = getVaultUrl();
+      const secretName = args[1];
+
+      if (!secretName) {
+        console.error('Error: secret name required. Usage: vaultdotenv get SECRET_NAME [--env production] [--raw]');
+        process.exit(1);
+      }
+
+      const { secrets } = await pullSecrets(vaultKey, env, vaultUrl);
+
+      if (!(secretName in secrets)) {
+        console.error(`Error: ${secretName} not found in ${env}`);
+        process.exit(1);
+      }
+
+      if (args.includes('--raw')) {
+        process.stdout.write(String(secrets[secretName]));
+      } else {
+        console.log(`${secretName}=${secrets[secretName]}`);
+      }
+      break;
+    }
+
     case 'versions': {
       const vaultKey = getVaultKey();
       const env = getEnvironment();
@@ -325,6 +351,7 @@ Usage:
   vaultdotenv init [--name project]   Initialize a new vault project
   vaultdotenv push [--env production] Push .env secrets to vault
   vaultdotenv pull [--env staging]    Pull secrets from vault
+  vaultdotenv get KEY [--env prod]    Get a single secret (--raw for value only)
   vaultdotenv versions [--env prod]   List secret versions
   vaultdotenv rollback --version 5    Rollback to a specific version
 
