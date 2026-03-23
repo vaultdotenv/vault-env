@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "vault-env"
+version = "0.1.0"
+description = "Drop-in python-dotenv replacement. One master key locally, everything else encrypted remotely."
+requires-python = ">=3.10"
+license = "MIT"
+authors = [{ name = "Matt Redman" }]
+dependencies = [
+    "cryptography>=41.0",
+    "httpx>=0.24",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]

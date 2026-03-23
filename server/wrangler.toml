@@ -1,0 +1,12 @@
+name = "vault"
+main = "worker.js"
+compatibility_date = "2024-01-01"
+
+routes = [
+  { pattern = "api.vaultdotenv.io/*", zone_name = "vaultdotenv.io" }
+]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "vault-db"
+database_id = "b552f757-7630-44c7-a7c9-547d53bb7009"

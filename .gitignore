@@ -1,0 +1,8 @@
+node_modules/
+.next/
+out/
+.vault-cache
+.env
+*.key
+.DS_Store
+.wrangler/
