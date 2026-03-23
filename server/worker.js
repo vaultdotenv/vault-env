@@ -391,7 +391,7 @@ async function handlePull(request, env, corsHeaders) {
 async function handlePush(request, env, corsHeaders) {
   const body = await request.text();
   const sig = request.headers.get('X-Vault-Signature') || '';
-  const { project_id, environment, secrets, key_names, device_hash } = JSON.parse(body);
+  const { project_id, environment, secrets, key_names, key_count, device_hash } = JSON.parse(body);
 
   // Get project
   const project = await env.DB.prepare('SELECT * FROM projects WHERE id = ?').bind(project_id).first();
@@ -414,7 +414,8 @@ async function handlePush(request, env, corsHeaders) {
   }
 
   // Enforce secret count limit
-  if (key_names) {
+  const totalKeys = key_count || (key_names ? key_names.length : 0);
+  if (totalKeys > 0) {
     const ownerRow = await env.DB.prepare(
       'SELECT user_id FROM user_projects WHERE project_id = ? AND role = ?'
     ).bind(project_id, 'owner').first();
@@ -422,9 +423,9 @@ async function handlePush(request, env, corsHeaders) {
       const userRow = await env.DB.prepare('SELECT plan FROM users WHERE id = ?').bind(ownerRow.user_id).first();
       const plan = userRow?.plan || 'free';
       const limits = PLAN_LIMITS[plan] || PLAN_LIMITS.free;
-      if (limits.secrets !== -1 && key_names.length > limits.secrets) {
+      if (limits.secrets !== -1 && totalKeys > limits.secrets) {
         return Response.json(
-          { error: `Secret limit exceeded: ${key_names.length} secrets, plan allows ${limits.secrets}. Upgrade at app.vaultdotenv.io` },
+          { error: `Secret limit exceeded: ${totalKeys} secrets, plan allows ${limits.secrets}. Upgrade at app.vaultdotenv.io` },
           { status: 403, headers: corsHeaders }
         );
       }
@@ -452,7 +453,7 @@ async function handlePush(request, env, corsHeaders) {
 
   // Store encrypted blob + key names + count
   const changedKeys = key_names ? JSON.stringify(key_names) : null;
-  const keyCount = key_names ? key_names.length : 0;
+  const keyCount = key_count || (key_names ? key_names.length : 0);
   await env.DB.prepare(
     'INSERT INTO secret_versions (environment_id, version, encrypted_blob, changed_keys, key_count, created_at) VALUES (?, ?, ?, ?, ?, ?)'
   ).bind(envRow.id, nextVersion, secrets, changedKeys, keyCount, new Date().toISOString()).run();
@@ -1008,22 +1009,27 @@ async function getUserPlanUsage(env, userId) {
     WHERE up.user_id = ? AND d.status != 'revoked'
   `).bind(userId).first();
 
-  // Max secrets in any single environment (limit is per-env)
-  const maxSecrets = await env.DB.prepare(`
-    SELECT MAX(sv.key_count) as max_keys
-    FROM secret_versions sv
-    JOIN environments e ON sv.environment_id = e.id
+  // Per-environment secret counts (latest version of each)
+  const envSecrets = await env.DB.prepare(`
+    SELECT e.name as env_name, COALESCE(sv.key_count, 0) as secret_count
+    FROM environments e
     JOIN user_projects up ON e.project_id = up.project_id
+    LEFT JOIN secret_versions sv ON sv.environment_id = e.id
+      AND sv.version = (SELECT MAX(version) FROM secret_versions WHERE environment_id = e.id)
     WHERE up.user_id = ?
-      AND sv.version = (SELECT MAX(version) FROM secret_versions WHERE environment_id = sv.environment_id)
-  `).bind(userId).first();
+    ORDER BY e.name
+  `).bind(userId).all();
+
+  const secretsByEnv = (envSecrets?.results || []).map(r => ({ name: r.env_name, count: r.secret_count }));
+  const maxSecretCount = Math.max(0, ...secretsByEnv.map(e => e.count));
 
   return {
     plan, limits,
     projectCount: projectCount?.cnt || 0,
     environmentCount: envCount?.cnt || 0,
     deviceCount: deviceCount?.cnt || 0,
-    secretCount: maxSecrets?.max_keys || 0,
+    secretCount: maxSecretCount,
+    secretsByEnv,
   };
 }
 
@@ -1040,6 +1046,7 @@ async function dashboardGetPlan(env, user, corsHeaders) {
       environments: usage.environmentCount,
       devices: usage.deviceCount,
       secrets: usage.secretCount,
+      secretsByEnv: usage.secretsByEnv,
     },
   }, { headers: corsHeaders });
 }

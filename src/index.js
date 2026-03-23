@@ -169,11 +169,13 @@ async function pushSecrets(vaultKey, environment, secrets, vaultUrl, deviceSecre
   if (deviceSecret === undefined) deviceSecret = loadDeviceSecret(parsed.projectId);
 
   const encryptedSecrets = encrypt(JSON.stringify(secrets), vaultKey, deviceSecret);
+  const allKeys = Object.keys(secrets);
   const body = JSON.stringify({
     project_id: parsed.projectId,
     environment,
     secrets: encryptedSecrets,
-    key_names: changedKeys || Object.keys(secrets),
+    key_names: changedKeys || allKeys,
+    key_count: allKeys.length,
     device_hash: deviceSecret ? hashDeviceSecret(deviceSecret) : undefined,
   });
   const { signature } = sign(vaultKey, body);
