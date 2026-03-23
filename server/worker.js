@@ -8,7 +8,11 @@
  *   projects(id, name, key_hash, created_at)
  *   environments(id, project_id, name, created_at)
  *   secret_versions(id, environment_id, version, encrypted_blob, changed_keys, created_at)
+ *   devices(id, project_id, device_name, device_hash, status, created_at, approved_at, last_seen_at)
  *   audit_log(id, project_id, action, ip, user_agent, created_at)
+ *   users(id, email, password_hash, created_at)
+ *   sessions(id, user_id, expires_at, created_at)
+ *   user_projects(user_id, project_id, role, created_at)
  */
 
 const HMAC_MAX_AGE_MS = 300_000; // 5 minutes
@@ -67,7 +71,7 @@ export default {
         headers: {
           'Access-Control-Allow-Origin': '*',
           'Access-Control-Allow-Methods': 'POST, GET, OPTIONS',
-          'Access-Control-Allow-Headers': 'Content-Type, X-Vault-Signature',
+          'Access-Control-Allow-Headers': 'Content-Type, X-Vault-Signature, Authorization',
         },
       });
     }
@@ -110,6 +114,11 @@ export default {
       }
       if (path === '/health') {
         return Response.json({ status: 'ok', ts: Date.now() }, { headers: corsHeaders });
+      }
+
+      // ── Dashboard API ───────────────────────────────────────────────────────
+      if (path.startsWith('/api/v1/dashboard/')) {
+        return handleDashboard(request, env, corsHeaders, path);
       }
 
       return Response.json({ error: 'Not found' }, { status: 404, headers: corsHeaders });
@@ -493,4 +502,407 @@ async function handleRollback(request, env, corsHeaders) {
   ).bind(project_id, envRow.id, 'rollback', request.headers.get('CF-Connecting-IP'), request.headers.get('User-Agent'), new Date().toISOString()).run();
 
   return Response.json({ version: nextVersion }, { headers: corsHeaders });
+}
+
+// ── Password Hashing (PBKDF2 via Web Crypto) ──────────────────────────────
+
+const PBKDF2_ITERATIONS = 100_000;
+
+async function hashPassword(password) {
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  const keyMaterial = await crypto.subtle.importKey(
+    'raw', new TextEncoder().encode(password), 'PBKDF2', false, ['deriveBits']
+  );
+  const bits = await crypto.subtle.deriveBits(
+    { name: 'PBKDF2', salt, iterations: PBKDF2_ITERATIONS, hash: 'SHA-256' },
+    keyMaterial, 256
+  );
+  const hash = new Uint8Array(bits);
+  const saltHex = bufferToHex(salt);
+  const hashHex = bufferToHex(hash);
+  return `pbkdf2:${PBKDF2_ITERATIONS}:${saltHex}:${hashHex}`;
+}
+
+async function verifyPassword(password, stored) {
+  const [, iterStr, saltHex, hashHex] = stored.split(':');
+  const iterations = parseInt(iterStr, 10);
+  const salt = hexToUint8(saltHex);
+  const keyMaterial = await crypto.subtle.importKey(
+    'raw', new TextEncoder().encode(password), 'PBKDF2', false, ['deriveBits']
+  );
+  const bits = await crypto.subtle.deriveBits(
+    { name: 'PBKDF2', salt, iterations, hash: 'SHA-256' },
+    keyMaterial, 256
+  );
+  return bufferToHex(new Uint8Array(bits)) === hashHex;
+}
+
+function bufferToHex(buf) {
+  return Array.from(buf).map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+function hexToUint8(hex) {
+  const bytes = new Uint8Array(hex.length / 2);
+  for (let i = 0; i < hex.length; i += 2) {
+    bytes[i / 2] = parseInt(hex.substr(i, 2), 16);
+  }
+  return bytes;
+}
+
+// ── Session Helpers ────────────────────────────────────────────────────────
+
+const SESSION_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
+
+async function createSession(env, userId) {
+  const id = crypto.randomUUID();
+  const now = new Date();
+  const expires = new Date(now.getTime() + SESSION_MAX_AGE_MS);
+  await env.DB.prepare(
+    'INSERT INTO sessions (id, user_id, expires_at, created_at) VALUES (?, ?, ?, ?)'
+  ).bind(id, userId, expires.toISOString(), now.toISOString()).run();
+  return id;
+}
+
+async function validateSession(env, request) {
+  const auth = request.headers.get('Authorization') || '';
+  const token = auth.startsWith('Bearer ') ? auth.slice(7) : null;
+  if (!token) return null;
+
+  const session = await env.DB.prepare(
+    'SELECT s.*, u.id as uid, u.email FROM sessions s JOIN users u ON s.user_id = u.id WHERE s.id = ?'
+  ).bind(token).first();
+
+  if (!session) return null;
+  if (new Date(session.expires_at) < new Date()) {
+    await env.DB.prepare('DELETE FROM sessions WHERE id = ?').bind(token).run();
+    return null;
+  }
+
+  return { id: session.uid, email: session.email };
+}
+
+async function requireSession(env, request, corsHeaders) {
+  const user = await validateSession(env, request);
+  if (!user) {
+    return { user: null, error: Response.json({ error: 'Unauthorized' }, { status: 401, headers: corsHeaders }) };
+  }
+  return { user, error: null };
+}
+
+async function requireProjectAccess(env, userId, projectId, corsHeaders) {
+  const row = await env.DB.prepare(
+    'SELECT * FROM user_projects WHERE user_id = ? AND project_id = ?'
+  ).bind(userId, projectId).first();
+  if (!row) {
+    return { ok: false, error: Response.json({ error: 'Project not found' }, { status: 404, headers: corsHeaders }) };
+  }
+  return { ok: true, role: row.role, error: null };
+}
+
+// ── Dashboard Router ───────────────────────────────────────────────────────
+
+async function handleDashboard(request, env, corsHeaders, path) {
+  const method = request.method;
+
+  // ── Auth (no session required) ──────────────────────────────────────────
+
+  if (path === '/api/v1/dashboard/signup' && method === 'POST') {
+    return dashboardSignup(request, env, corsHeaders);
+  }
+  if (path === '/api/v1/dashboard/login' && method === 'POST') {
+    return dashboardLogin(request, env, corsHeaders);
+  }
+
+  // ── Everything below requires a valid session ──────────────────────────
+
+  const { user, error } = await requireSession(env, request, corsHeaders);
+  if (error) return error;
+
+  if (path === '/api/v1/dashboard/me' && method === 'GET') {
+    return Response.json(user, { headers: corsHeaders });
+  }
+
+  if (path === '/api/v1/dashboard/logout' && method === 'POST') {
+    const token = (request.headers.get('Authorization') || '').slice(7);
+    await env.DB.prepare('DELETE FROM sessions WHERE id = ?').bind(token).run();
+    return Response.json({ ok: true }, { headers: corsHeaders });
+  }
+
+  if (path === '/api/v1/dashboard/projects' && method === 'GET') {
+    return dashboardListProjects(env, user, corsHeaders);
+  }
+
+  if (path === '/api/v1/dashboard/projects/create' && method === 'POST') {
+    return dashboardCreateProject(request, env, user, corsHeaders);
+  }
+
+  // ── Project-scoped routes ──────────────────────────────────────────────
+
+  const projectMatch = path.match(/^\/api\/v1\/dashboard\/projects\/([^/]+)(.*)$/);
+  if (projectMatch) {
+    const projectId = projectMatch[1];
+    const sub = projectMatch[2];
+
+    // Skip access check for "create" (already handled above)
+    if (projectId === 'create') {
+      return Response.json({ error: 'Not found' }, { status: 404, headers: corsHeaders });
+    }
+
+    const access = await requireProjectAccess(env, user.id, projectId, corsHeaders);
+    if (!access.ok) return access.error;
+
+    if (sub === '' && method === 'GET') {
+      return dashboardGetProject(env, projectId, corsHeaders);
+    }
+    if (sub === '/environments' && method === 'GET') {
+      return dashboardListEnvironments(env, projectId, corsHeaders);
+    }
+    if (sub === '/devices' && method === 'GET') {
+      return dashboardListDevices(env, projectId, corsHeaders);
+    }
+    if (sub === '/audit' && method === 'GET') {
+      return dashboardListAudit(request, env, projectId, corsHeaders);
+    }
+
+    // /projects/:id/environments/:env/versions
+    const versionsMatch = sub.match(/^\/environments\/([^/]+)\/versions$/);
+    if (versionsMatch && method === 'GET') {
+      return dashboardListVersions(env, projectId, versionsMatch[1], corsHeaders);
+    }
+
+    // /projects/:id/devices/:deviceId/approve
+    const approveMatch = sub.match(/^\/devices\/([^/]+)\/approve$/);
+    if (approveMatch && method === 'POST') {
+      return dashboardApproveDevice(env, projectId, approveMatch[1], corsHeaders);
+    }
+
+    // /projects/:id/devices/:deviceId/revoke
+    const revokeMatch = sub.match(/^\/devices\/([^/]+)\/revoke$/);
+    if (revokeMatch && method === 'POST') {
+      return dashboardRevokeDevice(env, projectId, revokeMatch[1], corsHeaders);
+    }
+  }
+
+  return Response.json({ error: 'Not found' }, { status: 404, headers: corsHeaders });
+}
+
+// ── Dashboard Auth Handlers ────────────────────────────────────────────────
+
+async function dashboardSignup(request, env, corsHeaders) {
+  const { email, password } = await request.json();
+
+  if (!email || !password) {
+    return Response.json({ error: 'Email and password required' }, { status: 400, headers: corsHeaders });
+  }
+  if (password.length < 8) {
+    return Response.json({ error: 'Password must be at least 8 characters' }, { status: 400, headers: corsHeaders });
+  }
+
+  const existing = await env.DB.prepare('SELECT id FROM users WHERE email = ?').bind(email.toLowerCase()).first();
+  if (existing) {
+    return Response.json({ error: 'Email already registered' }, { status: 409, headers: corsHeaders });
+  }
+
+  const id = crypto.randomUUID();
+  const passwordHash = await hashPassword(password);
+  const now = new Date().toISOString();
+
+  await env.DB.prepare(
+    'INSERT INTO users (id, email, password_hash, created_at) VALUES (?, ?, ?, ?)'
+  ).bind(id, email.toLowerCase(), passwordHash, now).run();
+
+  const token = await createSession(env, id);
+
+  return Response.json({
+    token,
+    user: { id, email: email.toLowerCase(), created_at: now },
+  }, { headers: corsHeaders });
+}
+
+async function dashboardLogin(request, env, corsHeaders) {
+  const { email, password } = await request.json();
+
+  if (!email || !password) {
+    return Response.json({ error: 'Email and password required' }, { status: 400, headers: corsHeaders });
+  }
+
+  const user = await env.DB.prepare(
+    'SELECT * FROM users WHERE email = ?'
+  ).bind(email.toLowerCase()).first();
+
+  if (!user || !(await verifyPassword(password, user.password_hash))) {
+    return Response.json({ error: 'Invalid email or password' }, { status: 401, headers: corsHeaders });
+  }
+
+  const token = await createSession(env, user.id);
+
+  return Response.json({
+    token,
+    user: { id: user.id, email: user.email, created_at: user.created_at },
+  }, { headers: corsHeaders });
+}
+
+// ── Dashboard Project Handlers ─────────────────────────────────────────────
+
+async function dashboardListProjects(env, user, corsHeaders) {
+  const rows = await env.DB.prepare(`
+    SELECT p.id, p.name, p.created_at
+    FROM projects p
+    JOIN user_projects up ON p.id = up.project_id
+    WHERE up.user_id = ?
+    ORDER BY p.created_at DESC
+  `).bind(user.id).all();
+
+  const projects = [];
+  for (const proj of rows.results) {
+    const envs = await env.DB.prepare(
+      'SELECT id, name, created_at FROM environments WHERE project_id = ? ORDER BY name'
+    ).bind(proj.id).all();
+
+    const environments = [];
+    for (const e of envs.results) {
+      const latest = await env.DB.prepare(
+        'SELECT version, created_at FROM secret_versions WHERE environment_id = ? ORDER BY version DESC LIMIT 1'
+      ).bind(e.id).first();
+      environments.push({
+        ...e,
+        latest_version: latest?.version || null,
+        updated_at: latest?.created_at || null,
+      });
+    }
+
+    projects.push({ ...proj, environments });
+  }
+
+  return Response.json({ projects }, { headers: corsHeaders });
+}
+
+async function dashboardCreateProject(request, env, user, corsHeaders) {
+  const { project_name } = await request.json();
+  if (!project_name) {
+    return Response.json({ error: 'project_name required' }, { status: 400, headers: corsHeaders });
+  }
+
+  const id = crypto.randomUUID();
+  const now = new Date().toISOString();
+
+  await env.DB.prepare(
+    'INSERT INTO projects (id, name, key_hash, created_at) VALUES (?, ?, ?, ?)'
+  ).bind(id, project_name, '', now).run();
+
+  for (const envName of ['development', 'staging', 'production']) {
+    await env.DB.prepare(
+      'INSERT INTO environments (id, project_id, name, created_at) VALUES (?, ?, ?, ?)'
+    ).bind(crypto.randomUUID(), id, envName, now).run();
+  }
+
+  await env.DB.prepare(
+    'INSERT INTO user_projects (user_id, project_id, role, created_at) VALUES (?, ?, ?, ?)'
+  ).bind(user.id, id, 'owner', now).run();
+
+  return Response.json({ project_id: id }, { headers: corsHeaders });
+}
+
+async function dashboardGetProject(env, projectId, corsHeaders) {
+  const project = await env.DB.prepare('SELECT id, name, created_at FROM projects WHERE id = ?').bind(projectId).first();
+  if (!project) return Response.json({ error: 'Project not found' }, { status: 404, headers: corsHeaders });
+
+  const envs = await env.DB.prepare(
+    'SELECT id, name, created_at FROM environments WHERE project_id = ? ORDER BY name'
+  ).bind(projectId).all();
+
+  const environments = [];
+  for (const e of envs.results) {
+    const latest = await env.DB.prepare(
+      'SELECT version, created_at FROM secret_versions WHERE environment_id = ? ORDER BY version DESC LIMIT 1'
+    ).bind(e.id).first();
+    environments.push({
+      ...e,
+      latest_version: latest?.version || null,
+      updated_at: latest?.created_at || null,
+    });
+  }
+
+  return Response.json({ ...project, environments }, { headers: corsHeaders });
+}
+
+async function dashboardListEnvironments(env, projectId, corsHeaders) {
+  const envs = await env.DB.prepare(
+    'SELECT id, name, created_at FROM environments WHERE project_id = ? ORDER BY name'
+  ).bind(projectId).all();
+  return Response.json({ environments: envs.results }, { headers: corsHeaders });
+}
+
+// ── Dashboard Device Handlers ──────────────────────────────────────────────
+
+async function dashboardListDevices(env, projectId, corsHeaders) {
+  const devices = await env.DB.prepare(
+    'SELECT id, device_name, status, created_at, approved_at, last_seen_at FROM devices WHERE project_id = ? ORDER BY created_at DESC'
+  ).bind(projectId).all();
+  return Response.json({ devices: devices.results }, { headers: corsHeaders });
+}
+
+async function dashboardApproveDevice(env, projectId, deviceId, corsHeaders) {
+  const device = await env.DB.prepare(
+    'SELECT * FROM devices WHERE id = ? AND project_id = ?'
+  ).bind(deviceId, projectId).first();
+  if (!device) return Response.json({ error: 'Device not found' }, { status: 404, headers: corsHeaders });
+
+  await env.DB.prepare(
+    'UPDATE devices SET status = ?, approved_at = ? WHERE id = ?'
+  ).bind('approved', new Date().toISOString(), deviceId).run();
+
+  return Response.json({ device_id: deviceId, status: 'approved' }, { headers: corsHeaders });
+}
+
+async function dashboardRevokeDevice(env, projectId, deviceId, corsHeaders) {
+  const device = await env.DB.prepare(
+    'SELECT * FROM devices WHERE id = ? AND project_id = ?'
+  ).bind(deviceId, projectId).first();
+  if (!device) return Response.json({ error: 'Device not found' }, { status: 404, headers: corsHeaders });
+
+  await env.DB.prepare('UPDATE devices SET status = ? WHERE id = ?').bind('revoked', deviceId).run();
+
+  return Response.json({ device_id: deviceId, status: 'revoked' }, { headers: corsHeaders });
+}
+
+// ── Dashboard Version + Audit Handlers ─────────────────────────────────────
+
+async function dashboardListVersions(env, projectId, environment, corsHeaders) {
+  const envRow = await env.DB.prepare(
+    'SELECT * FROM environments WHERE project_id = ? AND name = ?'
+  ).bind(projectId, environment).first();
+  if (!envRow) return Response.json({ error: 'Environment not found' }, { status: 404, headers: corsHeaders });
+
+  const versions = await env.DB.prepare(
+    'SELECT version, changed_keys, created_at FROM secret_versions WHERE environment_id = ? ORDER BY version DESC LIMIT 50'
+  ).bind(envRow.id).all();
+
+  return Response.json({ versions: versions.results }, { headers: corsHeaders });
+}
+
+async function dashboardListAudit(request, env, projectId, corsHeaders) {
+  const url = new URL(request.url);
+  const page = parseInt(url.searchParams.get('page') || '1', 10);
+  const limit = 50;
+  const offset = (page - 1) * limit;
+
+  const countRow = await env.DB.prepare(
+    'SELECT COUNT(*) as total FROM audit_log WHERE project_id = ?'
+  ).bind(projectId).first();
+
+  const entries = await env.DB.prepare(`
+    SELECT a.id, a.action, a.ip, a.user_agent, a.created_at,
+           e.name as environment_name
+    FROM audit_log a
+    LEFT JOIN environments e ON a.environment_id = e.id
+    WHERE a.project_id = ?
+    ORDER BY a.created_at DESC
+    LIMIT ? OFFSET ?
+  `).bind(projectId, limit, offset).all();
+
+  return Response.json({
+    entries: entries.results,
+    total: countRow?.total || 0,
+  }, { headers: corsHeaders });
 }

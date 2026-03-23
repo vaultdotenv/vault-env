@@ -3,7 +3,8 @@ main = "worker.js"
 compatibility_date = "2024-01-01"
 
 routes = [
-  { pattern = "api.vaultdotenv.io/*", zone_name = "vaultdotenv.io" }
+  { pattern = "api.vaultdotenv.io/*", zone_name = "vaultdotenv.io" },
+  { pattern = "vault.satinvoice.com/*", zone_name = "satinvoice.com" }
 ]
 
 [[d1_databases]]
