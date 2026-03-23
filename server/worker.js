@@ -977,18 +977,53 @@ async function getUserPlanUsage(env, userId) {
     'SELECT COUNT(*) as cnt FROM user_projects WHERE user_id = ?'
   ).bind(userId).first();
 
-  return { plan, limits, projectCount: projectCount?.cnt || 0 };
+  const envCount = await env.DB.prepare(`
+    SELECT COUNT(*) as cnt FROM environments e
+    JOIN user_projects up ON e.project_id = up.project_id
+    WHERE up.user_id = ?
+  `).bind(userId).first();
+
+  const deviceCount = await env.DB.prepare(`
+    SELECT COUNT(*) as cnt FROM devices d
+    JOIN user_projects up ON d.project_id = up.project_id
+    WHERE up.user_id = ? AND d.status != 'revoked'
+  `).bind(userId).first();
+
+  // Max secrets in any single environment (limit is per-env)
+  const maxSecrets = await env.DB.prepare(`
+    SELECT MAX(key_count) as max_keys FROM (
+      SELECT CASE WHEN sv.changed_keys IS NOT NULL THEN json_array_length(sv.changed_keys) ELSE 0 END as key_count
+      FROM secret_versions sv
+      JOIN environments e ON sv.environment_id = e.id
+      JOIN user_projects up ON e.project_id = up.project_id
+      WHERE up.user_id = ?
+        AND sv.version = (SELECT MAX(version) FROM secret_versions WHERE environment_id = sv.environment_id)
+    )
+  `).bind(userId).first();
+
+  return {
+    plan, limits,
+    projectCount: projectCount?.cnt || 0,
+    environmentCount: envCount?.cnt || 0,
+    deviceCount: deviceCount?.cnt || 0,
+    secretCount: maxSecrets?.max_keys || 0,
+  };
 }
 
 // ── Plan Handlers ──────────────────────────────────────────────────────────
 
 async function dashboardGetPlan(env, user, corsHeaders) {
-  const { plan, limits, projectCount } = await getUserPlanUsage(env, user.id);
+  const usage = await getUserPlanUsage(env, user.id);
 
   return Response.json({
-    plan,
-    limits,
-    usage: { projects: projectCount },
+    plan: usage.plan,
+    limits: usage.limits,
+    usage: {
+      projects: usage.projectCount,
+      environments: usage.environmentCount,
+      devices: usage.deviceCount,
+      secrets: usage.secretCount,
+    },
   }, { headers: corsHeaders });
 }
 

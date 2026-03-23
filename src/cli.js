@@ -260,7 +260,7 @@ async function main() {
 
       secrets[secretName] = secretValue;
 
-      const pushResult = await pushSecrets(vaultKey, env, secrets, vaultUrl);
+      const pushResult = await pushSecrets(vaultKey, env, secrets, vaultUrl, undefined, [secretName]);
       console.log(`Set ${secretName}. Version: ${pushResult.version} (${Object.keys(secrets).length} total secrets)`);
       break;
     }
@@ -298,7 +298,7 @@ async function main() {
       }
 
       delete secrets[secretName];
-      const pushResult = await pushSecrets(vaultKey, env, secrets, vaultUrl);
+      const pushResult = await pushSecrets(vaultKey, env, secrets, vaultUrl, undefined, [`-${secretName}`]);
       console.log(`Deleted ${secretName}. Version: ${pushResult.version} (${Object.keys(secrets).length} secrets remaining)`);
       break;
     }

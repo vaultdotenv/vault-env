@@ -161,7 +161,7 @@ async function pullSecrets(vaultKey, environment, vaultUrl, deviceSecret) {
 /**
  * Push secrets to the vault server.
  */
-async function pushSecrets(vaultKey, environment, secrets, vaultUrl, deviceSecret) {
+async function pushSecrets(vaultKey, environment, secrets, vaultUrl, deviceSecret, changedKeys) {
   const parsed = parseVaultKey(vaultKey);
   if (!parsed) throw new Error('Invalid VAULT_KEY format. Expected: vk_<projectId>_<secret>');
 
@@ -173,7 +173,7 @@ async function pushSecrets(vaultKey, environment, secrets, vaultUrl, deviceSecre
     project_id: parsed.projectId,
     environment,
     secrets: encryptedSecrets,
-    key_names: Object.keys(secrets),
+    key_names: changedKeys || Object.keys(secrets),
     device_hash: deviceSecret ? hashDeviceSecret(deviceSecret) : undefined,
   });
   const { signature } = sign(vaultKey, body);
