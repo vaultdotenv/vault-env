@@ -569,7 +569,7 @@ async function validateSession(env, request) {
   if (!token) return null;
 
   const session = await env.DB.prepare(
-    'SELECT s.*, u.id as uid, u.email FROM sessions s JOIN users u ON s.user_id = u.id WHERE s.id = ?'
+    'SELECT s.*, u.id as uid, u.email, u.plan FROM sessions s JOIN users u ON s.user_id = u.id WHERE s.id = ?'
   ).bind(token).first();
 
   if (!session) return null;
@@ -578,7 +578,7 @@ async function validateSession(env, request) {
     return null;
   }
 
-  return { id: session.uid, email: session.email };
+  return { id: session.uid, email: session.email, plan: session.plan || 'free' };
 }
 
 async function requireSession(env, request, corsHeaders) {
@@ -622,6 +622,24 @@ async function handleDashboard(request, env, corsHeaders, path) {
     return Response.json(user, { headers: corsHeaders });
   }
 
+  if (path === '/api/v1/dashboard/plan' && method === 'GET') {
+    return dashboardGetPlan(env, user, corsHeaders);
+  }
+
+  if (path === '/api/v1/dashboard/plan/upgrade' && method === 'POST') {
+    return dashboardUpgradePlan(request, env, user, corsHeaders);
+  }
+
+  // Accept invite (by token — user must be logged in)
+  if (path === '/api/v1/dashboard/invites/accept' && method === 'POST') {
+    return dashboardAcceptInvite(request, env, user, corsHeaders);
+  }
+
+  // List invites received by current user
+  if (path === '/api/v1/dashboard/invites' && method === 'GET') {
+    return dashboardListMyInvites(env, user, corsHeaders);
+  }
+
   if (path === '/api/v1/dashboard/logout' && method === 'POST') {
     const token = (request.headers.get('Authorization') || '').slice(7);
     await env.DB.prepare('DELETE FROM sessions WHERE id = ?').bind(token).run();
@@ -662,6 +680,31 @@ async function handleDashboard(request, env, corsHeaders, path) {
     }
     if (sub === '/audit' && method === 'GET') {
       return dashboardListAudit(request, env, projectId, corsHeaders);
+    }
+
+    // Invites
+    if (sub === '/invites' && method === 'GET') {
+      return dashboardListInvites(env, projectId, corsHeaders);
+    }
+    if (sub === '/invites' && method === 'POST') {
+      return dashboardCreateInvite(request, env, user, projectId, access.role, corsHeaders);
+    }
+
+    // /projects/:id/invites/:inviteId/revoke
+    const revokeInviteMatch = sub.match(/^\/invites\/([^/]+)\/revoke$/);
+    if (revokeInviteMatch && method === 'POST') {
+      return dashboardRevokeInvite(env, projectId, revokeInviteMatch[1], corsHeaders);
+    }
+
+    // Members
+    if (sub === '/members' && method === 'GET') {
+      return dashboardListMembers(env, projectId, corsHeaders);
+    }
+
+    // /projects/:id/members/:userId/remove
+    const removeMemberMatch = sub.match(/^\/members\/([^/]+)\/remove$/);
+    if (removeMemberMatch && method === 'POST') {
+      return dashboardRemoveMember(env, projectId, removeMemberMatch[1], user.id, corsHeaders);
     }
 
     // /projects/:id/environments/:env/versions
@@ -708,14 +751,14 @@ async function dashboardSignup(request, env, corsHeaders) {
   const now = new Date().toISOString();
 
   await env.DB.prepare(
-    'INSERT INTO users (id, email, password_hash, created_at) VALUES (?, ?, ?, ?)'
-  ).bind(id, email.toLowerCase(), passwordHash, now).run();
+    'INSERT INTO users (id, email, password_hash, plan, created_at) VALUES (?, ?, ?, ?, ?)'
+  ).bind(id, email.toLowerCase(), passwordHash, 'free', now).run();
 
   const token = await createSession(env, id);
 
   return Response.json({
     token,
-    user: { id, email: email.toLowerCase(), created_at: now },
+    user: { id, email: email.toLowerCase(), plan: 'free', created_at: now },
   }, { headers: corsHeaders });
 }
 
@@ -738,7 +781,7 @@ async function dashboardLogin(request, env, corsHeaders) {
 
   return Response.json({
     token,
-    user: { id: user.id, email: user.email, created_at: user.created_at },
+    user: { id: user.id, email: user.email, plan: user.plan || 'free', created_at: user.created_at },
   }, { headers: corsHeaders });
 }
 
@@ -905,4 +948,239 @@ async function dashboardListAudit(request, env, projectId, corsHeaders) {
     entries: entries.results,
     total: countRow?.total || 0,
   }, { headers: corsHeaders });
+}
+
+// ── Plan Limits ────────────────────────────────────────────────────────────
+
+const PLAN_LIMITS = {
+  free:  { secrets: 10, environments: 2, projects: 1,  devices: 2  },
+  pro:   { secrets: 30, environments: 3, projects: 3,  devices: 5  },
+  team:  { secrets: 100, environments: -1, projects: 10, devices: -1 }, // -1 = unlimited
+};
+
+async function getUserPlanUsage(env, userId) {
+  const user = await env.DB.prepare('SELECT plan FROM users WHERE id = ?').bind(userId).first();
+  const plan = user?.plan || 'free';
+  const limits = PLAN_LIMITS[plan] || PLAN_LIMITS.free;
+
+  const projectCount = await env.DB.prepare(
+    'SELECT COUNT(*) as cnt FROM user_projects WHERE user_id = ?'
+  ).bind(userId).first();
+
+  return { plan, limits, projectCount: projectCount?.cnt || 0 };
+}
+
+// ── Plan Handlers ──────────────────────────────────────────────────────────
+
+async function dashboardGetPlan(env, user, corsHeaders) {
+  const { plan, limits, projectCount } = await getUserPlanUsage(env, user.id);
+
+  return Response.json({
+    plan,
+    limits,
+    usage: { projects: projectCount },
+  }, { headers: corsHeaders });
+}
+
+async function dashboardUpgradePlan(request, env, user, corsHeaders) {
+  const { plan } = await request.json();
+
+  if (!['free', 'pro', 'team'].includes(plan)) {
+    return Response.json({ error: 'Invalid plan' }, { status: 400, headers: corsHeaders });
+  }
+
+  // TODO: Stripe integration — for now just update the plan directly
+  await env.DB.prepare('UPDATE users SET plan = ? WHERE id = ?').bind(plan, user.id).run();
+
+  return Response.json({ plan }, { headers: corsHeaders });
+}
+
+// ── Invite Handlers ────────────────────────────────────────────────────────
+
+const INVITE_EXPIRY_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
+
+async function dashboardCreateInvite(request, env, user, projectId, userRole, corsHeaders) {
+  // Only owners can invite
+  if (userRole !== 'owner') {
+    return Response.json({ error: 'Only project owners can invite members' }, { status: 403, headers: corsHeaders });
+  }
+
+  const { email, role } = await request.json();
+
+  if (!email) {
+    return Response.json({ error: 'Email required' }, { status: 400, headers: corsHeaders });
+  }
+
+  const inviteRole = role === 'owner' ? 'owner' : 'member';
+
+  // Check if already a member
+  const existingUser = await env.DB.prepare('SELECT id FROM users WHERE email = ?').bind(email.toLowerCase()).first();
+  if (existingUser) {
+    const existingMember = await env.DB.prepare(
+      'SELECT * FROM user_projects WHERE user_id = ? AND project_id = ?'
+    ).bind(existingUser.id, projectId).first();
+    if (existingMember) {
+      return Response.json({ error: 'User is already a member of this project' }, { status: 409, headers: corsHeaders });
+    }
+  }
+
+  // Check for existing pending invite
+  const existingInvite = await env.DB.prepare(
+    'SELECT * FROM invites WHERE project_id = ? AND email = ? AND status = ?'
+  ).bind(projectId, email.toLowerCase(), 'pending').first();
+  if (existingInvite) {
+    return Response.json({ error: 'Invite already sent to this email' }, { status: 409, headers: corsHeaders });
+  }
+
+  const id = crypto.randomUUID();
+  const token = crypto.randomUUID();
+  const now = new Date();
+  const expiresAt = new Date(now.getTime() + INVITE_EXPIRY_MS);
+
+  await env.DB.prepare(
+    'INSERT INTO invites (id, project_id, email, role, invited_by, status, token, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
+  ).bind(id, projectId, email.toLowerCase(), inviteRole, user.id, 'pending', token, now.toISOString(), expiresAt.toISOString()).run();
+
+  // TODO: Send invite email via Resend
+  // For now, return the token so it can be shared manually
+  return Response.json({
+    invite_id: id,
+    token,
+    email: email.toLowerCase(),
+    role: inviteRole,
+    expires_at: expiresAt.toISOString(),
+  }, { headers: corsHeaders });
+}
+
+async function dashboardListInvites(env, projectId, corsHeaders) {
+  const invites = await env.DB.prepare(`
+    SELECT i.id, i.email, i.role, i.status, i.created_at, i.expires_at,
+           u.email as invited_by_email
+    FROM invites i
+    JOIN users u ON i.invited_by = u.id
+    WHERE i.project_id = ?
+    ORDER BY i.created_at DESC
+  `).bind(projectId).all();
+
+  return Response.json({ invites: invites.results }, { headers: corsHeaders });
+}
+
+async function dashboardRevokeInvite(env, projectId, inviteId, corsHeaders) {
+  const invite = await env.DB.prepare(
+    'SELECT * FROM invites WHERE id = ? AND project_id = ?'
+  ).bind(inviteId, projectId).first();
+  if (!invite) return Response.json({ error: 'Invite not found' }, { status: 404, headers: corsHeaders });
+
+  await env.DB.prepare('UPDATE invites SET status = ? WHERE id = ?').bind('revoked', inviteId).run();
+
+  return Response.json({ ok: true }, { headers: corsHeaders });
+}
+
+async function dashboardAcceptInvite(request, env, user, corsHeaders) {
+  const { token } = await request.json();
+
+  if (!token) {
+    return Response.json({ error: 'Invite token required' }, { status: 400, headers: corsHeaders });
+  }
+
+  const invite = await env.DB.prepare(
+    'SELECT * FROM invites WHERE token = ? AND status = ?'
+  ).bind(token, 'pending').first();
+
+  if (!invite) {
+    return Response.json({ error: 'Invalid or expired invite' }, { status: 404, headers: corsHeaders });
+  }
+
+  // Check expiry
+  if (new Date(invite.expires_at) < new Date()) {
+    await env.DB.prepare('UPDATE invites SET status = ? WHERE id = ?').bind('expired', invite.id).run();
+    return Response.json({ error: 'Invite has expired' }, { status: 410, headers: corsHeaders });
+  }
+
+  // Check email matches
+  if (invite.email !== user.email) {
+    return Response.json({ error: 'This invite was sent to a different email address' }, { status: 403, headers: corsHeaders });
+  }
+
+  // Check not already a member
+  const existing = await env.DB.prepare(
+    'SELECT * FROM user_projects WHERE user_id = ? AND project_id = ?'
+  ).bind(user.id, invite.project_id).first();
+  if (existing) {
+    return Response.json({ error: 'Already a member of this project' }, { status: 409, headers: corsHeaders });
+  }
+
+  const now = new Date().toISOString();
+
+  // Add to project
+  await env.DB.prepare(
+    'INSERT INTO user_projects (user_id, project_id, role, created_at) VALUES (?, ?, ?, ?)'
+  ).bind(user.id, invite.project_id, invite.role, now).run();
+
+  // Mark invite as accepted
+  await env.DB.prepare(
+    'UPDATE invites SET status = ?, accepted_at = ? WHERE id = ?'
+  ).bind('accepted', now, invite.id).run();
+
+  return Response.json({
+    project_id: invite.project_id,
+    role: invite.role,
+  }, { headers: corsHeaders });
+}
+
+async function dashboardListMyInvites(env, user, corsHeaders) {
+  const invites = await env.DB.prepare(`
+    SELECT i.id, i.token, i.role, i.status, i.created_at, i.expires_at,
+           p.name as project_name,
+           u.email as invited_by_email
+    FROM invites i
+    JOIN projects p ON i.project_id = p.id
+    JOIN users u ON i.invited_by = u.id
+    WHERE i.email = ? AND i.status = 'pending'
+    ORDER BY i.created_at DESC
+  `).bind(user.email).all();
+
+  return Response.json({ invites: invites.results }, { headers: corsHeaders });
+}
+
+// ── Member Handlers ────────────────────────────────────────────────────────
+
+async function dashboardListMembers(env, projectId, corsHeaders) {
+  const members = await env.DB.prepare(`
+    SELECT u.id, u.email, up.role, up.created_at
+    FROM user_projects up
+    JOIN users u ON up.user_id = u.id
+    WHERE up.project_id = ?
+    ORDER BY up.created_at ASC
+  `).bind(projectId).all();
+
+  return Response.json({ members: members.results }, { headers: corsHeaders });
+}
+
+async function dashboardRemoveMember(env, projectId, targetUserId, currentUserId, corsHeaders) {
+  // Can't remove yourself
+  if (targetUserId === currentUserId) {
+    return Response.json({ error: 'Cannot remove yourself' }, { status: 400, headers: corsHeaders });
+  }
+
+  // Check current user is owner
+  const currentRole = await env.DB.prepare(
+    'SELECT role FROM user_projects WHERE user_id = ? AND project_id = ?'
+  ).bind(currentUserId, projectId).first();
+  if (!currentRole || currentRole.role !== 'owner') {
+    return Response.json({ error: 'Only owners can remove members' }, { status: 403, headers: corsHeaders });
+  }
+
+  const target = await env.DB.prepare(
+    'SELECT * FROM user_projects WHERE user_id = ? AND project_id = ?'
+  ).bind(targetUserId, projectId).first();
+  if (!target) {
+    return Response.json({ error: 'Member not found' }, { status: 404, headers: corsHeaders });
+  }
+
+  await env.DB.prepare(
+    'DELETE FROM user_projects WHERE user_id = ? AND project_id = ?'
+  ).bind(targetUserId, projectId).run();
+
+  return Response.json({ ok: true }, { headers: corsHeaders });
 }

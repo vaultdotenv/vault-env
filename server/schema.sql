@@ -59,6 +59,9 @@ CREATE TABLE IF NOT EXISTS users (
   id TEXT PRIMARY KEY,
   email TEXT NOT NULL UNIQUE,
   password_hash TEXT NOT NULL,
+  plan TEXT NOT NULL DEFAULT 'free',
+  stripe_customer_id TEXT,
+  stripe_subscription_id TEXT,
   created_at TEXT NOT NULL
 );
 
@@ -81,3 +84,22 @@ CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
 CREATE INDEX IF NOT EXISTS idx_user_projects_user ON user_projects(user_id);
 CREATE INDEX IF NOT EXISTS idx_user_projects_project ON user_projects(project_id);
 CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
+
+-- ── Invites ───────────────────────────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS invites (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(id),
+  email TEXT NOT NULL,
+  role TEXT NOT NULL DEFAULT 'member',
+  invited_by TEXT NOT NULL REFERENCES users(id),
+  status TEXT NOT NULL DEFAULT 'pending',
+  token TEXT NOT NULL UNIQUE,
+  created_at TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  accepted_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_invites_project ON invites(project_id);
+CREATE INDEX IF NOT EXISTS idx_invites_email ON invites(email);
+CREATE INDEX IF NOT EXISTS idx_invites_token ON invites(token);
