@@ -1210,8 +1210,8 @@ async function dashboardCreateRevealToken(env, user, projectId, corsHeaders) {
 
   // Audit log
   await env.DB.prepare(
-    'INSERT INTO audit_log (id, project_id, action, ip, user_agent, created_at) VALUES (?, ?, ?, ?, ?, ?)'
-  ).bind(crypto.randomUUID(), projectId, 'reveal_token_created', '', '', now).run();
+    'INSERT INTO audit_log (project_id, action, ip, user_agent, created_at) VALUES (?, ?, ?, ?, ?)'
+  ).bind(projectId, 'reveal_token_created', '', '', now).run();
 
   return Response.json({ token: id, expires_at: expiresAt }, { headers: corsHeaders });
 }
