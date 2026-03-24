@@ -1283,13 +1283,15 @@ async function dashboardCreateInvite(request, env, user, projectId, userRole, co
     return Response.json({ error: 'Only project owners can invite members' }, { status: 403, headers: corsHeaders });
   }
 
-  const { email, role } = await request.json();
+  const { email, role, permission, env_scope } = await request.json();
 
   if (!email) {
     return Response.json({ error: 'Email required' }, { status: 400, headers: corsHeaders });
   }
 
   const inviteRole = role === 'owner' ? 'owner' : 'member';
+  const invitePermission = ['read', 'write', 'admin'].includes(permission) ? permission : 'write';
+  const inviteEnvScope = env_scope && Array.isArray(env_scope) ? JSON.stringify(env_scope) : null;
 
   // Check if already a member
   const existingUser = await env.DB.prepare('SELECT id FROM users WHERE email = ?').bind(email.toLowerCase()).first();
@@ -1316,8 +1318,8 @@ async function dashboardCreateInvite(request, env, user, projectId, userRole, co
   const expiresAt = new Date(now.getTime() + INVITE_EXPIRY_MS);
 
   await env.DB.prepare(
-    'INSERT INTO invites (id, project_id, email, role, invited_by, status, token, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
-  ).bind(id, projectId, email.toLowerCase(), inviteRole, user.id, 'pending', token, now.toISOString(), expiresAt.toISOString()).run();
+    'INSERT INTO invites (id, project_id, email, role, invited_by, status, token, permission, env_scope, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+  ).bind(id, projectId, email.toLowerCase(), inviteRole, user.id, 'pending', token, invitePermission, inviteEnvScope, now.toISOString(), expiresAt.toISOString()).run();
 
   // Send invite email
   const project = await env.DB.prepare('SELECT name FROM projects WHERE id = ?').bind(projectId).first();
@@ -1397,10 +1399,10 @@ async function dashboardAcceptInvite(request, env, user, corsHeaders) {
 
   const now = new Date().toISOString();
 
-  // Add to project
+  // Add to project with permission + env_scope from invite
   await env.DB.prepare(
-    'INSERT INTO user_projects (user_id, project_id, role, created_at) VALUES (?, ?, ?, ?)'
-  ).bind(user.id, invite.project_id, invite.role, now).run();
+    'INSERT INTO user_projects (user_id, project_id, role, permission, env_scope, created_at) VALUES (?, ?, ?, ?, ?, ?)'
+  ).bind(user.id, invite.project_id, invite.role, invite.permission || 'write', invite.env_scope || null, now).run();
 
   // Mark invite as accepted
   await env.DB.prepare(
