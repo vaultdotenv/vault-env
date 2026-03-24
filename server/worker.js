@@ -1228,13 +1228,14 @@ async function getUserPlanUsage(env, userId) {
 
   // Per-environment secret counts (latest version of each)
   const envSecrets = await env.DB.prepare(`
-    SELECT e.name as env_name, COALESCE(sv.key_count, 0) as secret_count
+    SELECT p.name || ' / ' || e.name as env_name, COALESCE(sv.key_count, 0) as secret_count
     FROM environments e
+    JOIN projects p ON e.project_id = p.id
     JOIN user_projects up ON e.project_id = up.project_id
     LEFT JOIN secret_versions sv ON sv.environment_id = e.id
       AND sv.version = (SELECT MAX(version) FROM secret_versions WHERE environment_id = e.id)
     WHERE up.user_id = ?
-    ORDER BY e.name
+    ORDER BY p.name, e.name
   `).bind(userId).all();
 
   const secretsByEnv = (envSecrets?.results || []).map(r => ({ name: r.env_name, count: r.secret_count }));
