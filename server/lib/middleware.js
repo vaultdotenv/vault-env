@@ -6,13 +6,14 @@ import { SESSION_MAX_AGE_MS, PLAN_LIMITS } from './config.js';
 
 // ── Sessions ───────────────────────────────────────────────────────────────
 
-export async function createSession(env, userId) {
+export async function createSession(env, userId, data = null) {
   const id = crypto.randomUUID();
   const now = new Date();
   const expires = new Date(now.getTime() + SESSION_MAX_AGE_MS);
+  const dataStr = data ? JSON.stringify(data) : null;
   await env.DB.prepare(
-    'INSERT INTO sessions (id, user_id, expires_at, created_at) VALUES (?, ?, ?, ?)'
-  ).bind(id, userId, expires.toISOString(), now.toISOString()).run();
+    'INSERT INTO sessions (id, user_id, data, expires_at, created_at) VALUES (?, ?, ?, ?, ?)'
+  ).bind(id, userId, dataStr, expires.toISOString(), now.toISOString()).run();
   return id;
 }
 
@@ -22,7 +23,7 @@ export async function validateSession(env, request) {
   if (!token) return null;
 
   const session = await env.DB.prepare(
-    'SELECT s.*, u.id as uid, u.email, u.plan, u.is_superadmin FROM sessions s JOIN users u ON s.user_id = u.id WHERE s.id = ?'
+    'SELECT s.*, u.id as uid, u.email, u.plan, u.is_superadmin, u.totp_enabled FROM sessions s JOIN users u ON s.user_id = u.id WHERE s.id = ?'
   ).bind(token).first();
 
   if (!session) return null;
@@ -31,11 +32,16 @@ export async function validateSession(env, request) {
     return null;
   }
 
+  // Reject partial sessions (awaiting 2FA) from accessing authenticated routes
+  const data = session.data ? JSON.parse(session.data) : {};
+  if (data.awaiting_2fa) return null;
+
   return {
     id: session.uid,
     email: session.email,
     plan: session.plan || 'free',
     is_superadmin: !!session.is_superadmin,
+    totp_enabled: !!session.totp_enabled,
   };
 }
 

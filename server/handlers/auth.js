@@ -74,11 +74,17 @@ export async function dashboardLogin(request, env, corsHeaders) {
     return Response.json({ error: 'Invalid email or password' }, { status: 401, headers: corsHeaders });
   }
 
+  if (user.totp_enabled) {
+    // Create partial session — awaiting 2FA
+    const token = await createSession(env, user.id, { awaiting_2fa: true });
+    return Response.json({ requiresTwoFactor: true, token }, { headers: corsHeaders });
+  }
+
   const token = await createSession(env, user.id);
 
   return Response.json({
     token,
-    user: { id: user.id, email: user.email, plan: user.plan || 'free', is_superadmin: !!user.is_superadmin, created_at: user.created_at },
+    user: { id: user.id, email: user.email, plan: user.plan || 'free', is_superadmin: !!user.is_superadmin, totp_enabled: false, created_at: user.created_at },
   }, { headers: corsHeaders });
 }
 

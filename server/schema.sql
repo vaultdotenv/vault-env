@@ -90,6 +90,9 @@ CREATE TABLE IF NOT EXISTS users (
   email TEXT NOT NULL UNIQUE,
   password_hash TEXT NOT NULL,
   plan TEXT NOT NULL DEFAULT 'free',
+  is_superadmin INTEGER NOT NULL DEFAULT 0,
+  totp_secret TEXT,
+  totp_enabled INTEGER NOT NULL DEFAULT 0,
   stripe_customer_id TEXT,
   stripe_subscription_id TEXT,
   created_at TEXT NOT NULL
@@ -98,6 +101,7 @@ CREATE TABLE IF NOT EXISTS users (
 CREATE TABLE IF NOT EXISTS sessions (
   id TEXT PRIMARY KEY,
   user_id TEXT NOT NULL REFERENCES users(id),
+  data TEXT,
   expires_at TEXT NOT NULL,
   created_at TEXT NOT NULL
 );

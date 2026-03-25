@@ -15,6 +15,7 @@ import { dashboardListMembers, dashboardUpdatePermissions, dashboardRemoveMember
 import { dashboardListOrgs, dashboardCreateOrg, dashboardGetOrg, dashboardListOrgMembers, dashboardInviteOrgMember, dashboardRemoveOrgMember, dashboardListOrgProjects, dashboardCreateOrgProject, dashboardGetOrgPlan, dashboardUpgradeOrgPlan } from './handlers/orgs.js';
 import { dashboardGetPlan, dashboardUpgradePlan, dashboardCreateRevealToken, handleRevealTokenValidate } from './handlers/billing.js';
 import { handleAdmin } from './handlers/admin.js';
+import { handleMfa, mfaChallenge } from './handlers/mfa.js';
 
 const CORS_HEADERS = {
   'Access-Control-Allow-Origin': '*',
@@ -110,6 +111,9 @@ async function handleDashboardRoutes(request, env, corsHeaders, path) {
   if (path === '/api/v1/dashboard/login' && method === 'POST') {
     return dashboardLogin(request, env, corsHeaders);
   }
+  if (path === '/api/v1/dashboard/2fa/challenge' && method === 'POST') {
+    return mfaChallenge(request, env, corsHeaders);
+  }
 
   // ── Authenticated ──────────────────────────────────────────────────────
   const { user, error } = await requireSession(env, request, corsHeaders);
@@ -117,6 +121,9 @@ async function handleDashboardRoutes(request, env, corsHeaders, path) {
 
   if (path === '/api/v1/dashboard/me' && method === 'GET') {
     return Response.json(user, { headers: corsHeaders });
+  }
+  if (path.startsWith('/api/v1/dashboard/2fa/')) {
+    return handleMfa(request, env, user, corsHeaders, path, method);
   }
   if (path === '/api/v1/dashboard/logout' && method === 'POST') {
     const token = (request.headers.get('Authorization') || '').slice(7);
