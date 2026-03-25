@@ -1010,6 +1010,14 @@ async function handleDashboard(request, env, corsHeaders, path) {
     if (sub === '/reveal-token' && method === 'POST') {
       return dashboardCreateRevealToken(env, user, projectId, corsHeaders);
     }
+
+    // /projects/:id/move
+    if (sub === '/move' && method === 'POST') {
+      if (access.permission !== 'admin') {
+        return Response.json({ error: 'Requires admin permission' }, { status: 403, headers: corsHeaders });
+      }
+      return dashboardMoveProject(request, env, user, projectId, corsHeaders);
+    }
   }
 
   return Response.json({ error: 'Not found' }, { status: 404, headers: corsHeaders });
@@ -1157,8 +1165,48 @@ async function dashboardCreateProject(request, env, user, corsHeaders) {
   return Response.json({ project_id: id, org_id: targetOrgId }, { headers: corsHeaders });
 }
 
+async function dashboardMoveProject(request, env, user, projectId, corsHeaders) {
+  const { target_org_id } = await request.json();
+
+  if (!target_org_id) {
+    return Response.json({ error: 'target_org_id required' }, { status: 400, headers: corsHeaders });
+  }
+
+  // Verify user has access to the target org
+  const orgAccess = await env.DB.prepare(
+    'SELECT * FROM org_members WHERE user_id = ? AND org_id = ?'
+  ).bind(user.id, target_org_id).first();
+  if (!orgAccess) {
+    return Response.json({ error: 'No access to target organization' }, { status: 403, headers: corsHeaders });
+  }
+
+  // Move the project
+  await env.DB.prepare('UPDATE projects SET org_id = ? WHERE id = ?').bind(target_org_id, projectId).run();
+
+  // If moving to a named org, add all org members to the project
+  const org = await env.DB.prepare('SELECT * FROM orgs WHERE id = ?').bind(target_org_id).first();
+  if (org && !org.personal) {
+    const orgMembers = await env.DB.prepare(
+      'SELECT user_id, role FROM org_members WHERE org_id = ?'
+    ).bind(target_org_id).all();
+    const now = new Date().toISOString();
+    for (const member of orgMembers.results) {
+      const exists = await env.DB.prepare(
+        'SELECT 1 FROM user_projects WHERE user_id = ? AND project_id = ?'
+      ).bind(member.user_id, projectId).first();
+      if (!exists) {
+        await env.DB.prepare(
+          'INSERT INTO user_projects (user_id, project_id, role, permission, created_at) VALUES (?, ?, ?, ?, ?)'
+        ).bind(member.user_id, projectId, member.role, 'write', now).run();
+      }
+    }
+  }
+
+  return Response.json({ ok: true, org_id: target_org_id }, { headers: corsHeaders });
+}
+
 async function dashboardGetProject(env, projectId, corsHeaders) {
-  const project = await env.DB.prepare('SELECT id, name, created_at FROM projects WHERE id = ?').bind(projectId).first();
+  const project = await env.DB.prepare('SELECT id, name, org_id, created_at FROM projects WHERE id = ?').bind(projectId).first();
   if (!project) return Response.json({ error: 'Project not found' }, { status: 404, headers: corsHeaders });
 
   const envs = await env.DB.prepare(
