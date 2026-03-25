@@ -43,6 +43,9 @@ export async function handleAdmin(request, env, currentUser, corsHeaders, path, 
 export async function adminStats(env, corsHeaders) {
   const users = await env.DB.prepare('SELECT COUNT(*) as cnt FROM users').first();
   const projects = await env.DB.prepare('SELECT COUNT(*) as cnt FROM projects').first();
+  const orphanedProjects = await env.DB.prepare(
+    'SELECT COUNT(*) as cnt FROM projects WHERE id NOT IN (SELECT project_id FROM user_projects)'
+  ).first();
   const orgs = await env.DB.prepare('SELECT COUNT(*) as cnt FROM orgs WHERE personal = 0').first();
   const devices = await env.DB.prepare("SELECT COUNT(*) as cnt FROM devices WHERE status = 'approved'").first();
   const secrets = await env.DB.prepare('SELECT COUNT(*) as cnt FROM secret_versions').first();
@@ -51,6 +54,7 @@ export async function adminStats(env, corsHeaders) {
   return Response.json({
     users: users?.cnt || 0,
     projects: projects?.cnt || 0,
+    orphaned_projects: orphanedProjects?.cnt || 0,
     orgs: orgs?.cnt || 0,
     devices: devices?.cnt || 0,
     secret_versions: secrets?.cnt || 0,
