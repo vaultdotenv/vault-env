@@ -104,6 +104,54 @@ function orgInviteEmailHtml(inviterEmail, orgName, role) {
   `;
 }
 
+function welcomeEmailHtml(email) {
+  return `
+    <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; max-width: 480px; margin: 0 auto; padding: 40px 20px;">
+      <div style="text-align: center; margin-bottom: 32px;">
+        <div style="display: inline-block; background: #0d6efd; border-radius: 12px; padding: 12px; margin-bottom: 16px;">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" xmlns="http://www.w3.org/2000/svg">
+            <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/>
+            <path d="M7 11V7a5 5 0 0 1 10 0v4"/>
+          </svg>
+        </div>
+        <h1 style="font-size: 22px; font-weight: 700; color: #1a202c; margin: 0;">Welcome to vaultdotenv</h1>
+      </div>
+      <p style="font-size: 15px; color: #2d3748; line-height: 1.6;">
+        You're all set, <strong>${email}</strong>. Your account is ready.
+      </p>
+      <p style="font-size: 15px; color: #2d3748; line-height: 1.6;">
+        Here's how to get started:
+      </p>
+      <div style="background: #1a202c; border-radius: 12px; padding: 20px; margin: 24px 0;">
+        <pre style="margin: 0; font-family: 'JetBrains Mono', monospace; font-size: 13px; line-height: 1.8; color: #e2e8f0; overflow-x: auto;"><span style="color: #a0aec0;"># Install the CLI</span>
+<span style="color: #0d6efd;">$</span> npm install -g @vaultdotenv/cli
+
+<span style="color: #a0aec0;"># Create your first project</span>
+<span style="color: #0d6efd;">$</span> vde init --name my-app
+
+<span style="color: #a0aec0;"># Push your secrets</span>
+<span style="color: #0d6efd;">$</span> vde push --env production</pre>
+      </div>
+      <p style="font-size: 15px; color: #2d3748; line-height: 1.6;">
+        Your secrets are encrypted with AES-256-GCM before they leave your machine. The server never sees the plaintext. Each device gets its own encryption key.
+      </p>
+      <div style="text-align: center; margin: 32px 0;">
+        <a href="${DASHBOARD_URL}/projects" style="display: inline-block; background: #0d6efd; color: white; text-decoration: none; font-weight: 600; font-size: 15px; padding: 12px 32px; border-radius: 8px;">
+          Open Dashboard
+        </a>
+      </div>
+      <div style="border-top: 1px solid #e2e8f0; margin-top: 32px; padding-top: 20px;">
+        <p style="font-size: 13px; color: #a0aec0; line-height: 1.6; margin: 0;">
+          <strong>Useful links:</strong><br/>
+          <a href="https://vaultdotenv.io/docs" style="color: #0d6efd; text-decoration: none;">Documentation</a> &middot;
+          <a href="https://github.com/vaultdotenv/vaultdotenv" style="color: #0d6efd; text-decoration: none;">GitHub</a> &middot;
+          <a href="${DASHBOARD_URL}/settings" style="color: #0d6efd; text-decoration: none;">Account Settings</a>
+        </p>
+      </div>
+    </div>
+  `;
+}
+
 // ── Signature Verification ───────────────────────────────────────────────────
 
 async function verifySignature(body, sigHeader, keyHash) {
@@ -995,6 +1043,13 @@ async function dashboardSignup(request, env, corsHeaders) {
   ).bind(orgId, id, 'owner', now).run();
 
   const token = await createSession(env, id);
+
+  // Send welcome email (non-blocking)
+  sendEmail(env, {
+    to: email.toLowerCase(),
+    subject: 'Welcome to vaultdotenv',
+    html: welcomeEmailHtml(email.toLowerCase()),
+  }).catch(() => {});
 
   return Response.json({
     token,
