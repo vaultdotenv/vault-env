@@ -21,6 +21,7 @@ export async function dashboardGetPlan(env, user, corsHeaders) {
       devices: usage.deviceCount,
       secrets: usage.secretCount,
       secretsByEnv: usage.secretsByEnv,
+      projectDetails: usage.projects,
     },
   }, { headers: corsHeaders });
 }

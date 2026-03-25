@@ -170,6 +170,23 @@ export async function getUserPlanUsage(env, userId) {
   const secretsByEnv = (envSecrets?.results || []).map(r => ({ name: r.env_name, count: r.secret_count }));
   const maxSecretCount = Math.max(0, ...secretsByEnv.map(e => e.count));
 
+  const projectDetails = await env.DB.prepare(`
+    SELECT p.id, p.name,
+           (SELECT COUNT(*) FROM environments WHERE project_id = p.id) as environment_count,
+           (SELECT COUNT(*) FROM devices WHERE project_id = p.id AND status != 'revoked') as device_count,
+           COALESCE((
+             SELECT MAX(CASE WHEN sv.changed_keys IS NOT NULL THEN json_array_length(sv.changed_keys) ELSE 0 END)
+             FROM secret_versions sv
+             JOIN environments e ON sv.environment_id = e.id
+             WHERE e.project_id = p.id
+               AND sv.version = (SELECT MAX(version) FROM secret_versions WHERE environment_id = sv.environment_id)
+           ), 0) as secret_count
+    FROM projects p
+    JOIN user_projects up ON p.id = up.project_id
+    WHERE up.user_id = ?
+    ORDER BY p.name
+  `).bind(userId).all();
+
   return {
     plan, limits,
     projectCount: projectCount?.cnt || 0,
@@ -177,5 +194,12 @@ export async function getUserPlanUsage(env, userId) {
     deviceCount: deviceCount?.cnt || 0,
     secretCount: maxSecretCount,
     secretsByEnv,
+    projects: (projectDetails?.results || []).map(r => ({
+      id: r.id,
+      name: r.name,
+      environments: r.environment_count,
+      devices: r.device_count,
+      secrets: r.secret_count,
+    })),
   };
 }
