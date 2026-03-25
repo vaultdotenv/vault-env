@@ -1,7 +1,11 @@
 /**
- * Admin endpoints: stats, users, projects, orgs, update-user, delete-user.
+ * Admin endpoints: stats, users, projects, orgs, create-user, update-user, delete-user.
  * All endpoints require superadmin access (checked by the router).
  */
+
+import { hashPassword } from '../lib/crypto.js';
+import { createSession } from '../lib/middleware.js';
+import { sendEmail, welcomeEmailHtml } from '../lib/email.js';
 
 export async function handleAdmin(request, env, currentUser, corsHeaders, path, method) {
   if (path === '/api/v1/dashboard/admin/stats' && method === 'GET') {
@@ -15,6 +19,10 @@ export async function handleAdmin(request, env, currentUser, corsHeaders, path, 
   }
   if (path === '/api/v1/dashboard/admin/orgs' && method === 'GET') {
     return adminListOrgs(env, corsHeaders);
+  }
+
+  if (path === '/api/v1/dashboard/admin/users/create' && method === 'POST') {
+    return adminCreateUser(request, env, corsHeaders);
   }
 
   // /admin/users/:id/update
@@ -89,6 +97,57 @@ export async function adminListOrgs(env, corsHeaders) {
   `).all();
 
   return Response.json({ orgs: orgs.results }, { headers: corsHeaders });
+}
+
+export async function adminCreateUser(request, env, corsHeaders) {
+  const { email, password, plan, send_welcome } = await request.json();
+
+  if (!email) {
+    return Response.json({ error: 'Email required' }, { status: 400, headers: corsHeaders });
+  }
+
+  const existing = await env.DB.prepare('SELECT id FROM users WHERE email = ?').bind(email.toLowerCase()).first();
+  if (existing) {
+    return Response.json({ error: 'Email already registered' }, { status: 409, headers: corsHeaders });
+  }
+
+  // Generate a random password if not provided
+  const userPassword = password || crypto.randomUUID().slice(0, 16);
+  const passwordHash = await hashPassword(userPassword);
+  const userPlan = ['free', 'pro', 'team'].includes(plan) ? plan : 'free';
+  const id = crypto.randomUUID();
+  const now = new Date().toISOString();
+
+  await env.DB.prepare(
+    'INSERT INTO users (id, email, password_hash, plan, created_at) VALUES (?, ?, ?, ?, ?)'
+  ).bind(id, email.toLowerCase(), passwordHash, userPlan, now).run();
+
+  // Create personal org
+  const orgId = crypto.randomUUID();
+  const slug = email.toLowerCase().split('@')[0] + '-personal';
+  await env.DB.prepare(
+    'INSERT INTO orgs (id, name, slug, personal, plan, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)'
+  ).bind(orgId, 'Personal', slug, 1, userPlan, id, now).run();
+
+  await env.DB.prepare(
+    'INSERT INTO org_members (org_id, user_id, role, created_at) VALUES (?, ?, ?, ?)'
+  ).bind(orgId, id, 'owner', now).run();
+
+  // Send welcome email if requested
+  if (send_welcome !== false) {
+    sendEmail(env, {
+      to: email.toLowerCase(),
+      subject: 'Welcome to vaultdotenv',
+      html: welcomeEmailHtml(email.toLowerCase()),
+    }).catch(() => {});
+  }
+
+  return Response.json({
+    id,
+    email: email.toLowerCase(),
+    plan: userPlan,
+    temporary_password: password ? undefined : userPassword,
+  }, { headers: corsHeaders });
 }
 
 export async function adminUpdateUser(request, env, currentUser, userId, corsHeaders) {
