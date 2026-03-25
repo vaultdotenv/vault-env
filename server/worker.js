@@ -918,7 +918,7 @@ async function handleDashboard(request, env, corsHeaders, path) {
     if (!user.is_superadmin) {
       return Response.json({ error: 'Forbidden' }, { status: 403, headers: corsHeaders });
     }
-    return handleAdmin(request, env, corsHeaders, path, method);
+    return handleAdmin(request, env, user, corsHeaders, path, method);
   }
 
   // Legacy plan endpoints — redirect to personal org
@@ -1112,7 +1112,7 @@ async function dashboardLogin(request, env, corsHeaders) {
 
   return Response.json({
     token,
-    user: { id: user.id, email: user.email, plan: user.plan || 'free', created_at: user.created_at },
+    user: { id: user.id, email: user.email, plan: user.plan || 'free', is_superadmin: !!user.is_superadmin, created_at: user.created_at },
   }, { headers: corsHeaders });
 }
 
@@ -2049,7 +2049,7 @@ async function dashboardUpgradeOrgPlan(request, env, orgId, userRole, corsHeader
 
 // ── Admin Handlers (superadmin only) ───────────────────────────────────────
 
-async function handleAdmin(request, env, corsHeaders, path, method) {
+async function handleAdmin(request, env, currentUser, corsHeaders, path, method) {
   if (path === '/api/v1/dashboard/admin/stats' && method === 'GET') {
     return adminStats(env, corsHeaders);
   }
@@ -2066,7 +2066,7 @@ async function handleAdmin(request, env, corsHeaders, path, method) {
   // /admin/users/:id/update
   const userUpdateMatch = path.match(/^\/api\/v1\/dashboard\/admin\/users\/([^/]+)\/update$/);
   if (userUpdateMatch && method === 'POST') {
-    return adminUpdateUser(request, env, userUpdateMatch[1], corsHeaders);
+    return adminUpdateUser(request, env, currentUser, userUpdateMatch[1], corsHeaders);
   }
 
   // /admin/users/:id/delete
@@ -2142,7 +2142,7 @@ async function adminListOrgs(env, corsHeaders) {
   return Response.json({ orgs: orgs.results }, { headers: corsHeaders });
 }
 
-async function adminUpdateUser(request, env, userId, corsHeaders) {
+async function adminUpdateUser(request, env, currentUser, userId, corsHeaders) {
   const { plan, is_superadmin } = await request.json();
 
   const user = await env.DB.prepare('SELECT * FROM users WHERE id = ?').bind(userId).first();
@@ -2160,6 +2160,19 @@ async function adminUpdateUser(request, env, userId, corsHeaders) {
   }
 
   if (is_superadmin !== undefined) {
+    // Prevent self-revocation
+    if (!is_superadmin && userId === currentUser.id) {
+      return Response.json({ error: 'Cannot revoke your own superadmin access' }, { status: 400, headers: corsHeaders });
+    }
+    // Prevent revoking the last superadmin
+    if (!is_superadmin) {
+      const superadminCount = await env.DB.prepare(
+        'SELECT COUNT(*) as cnt FROM users WHERE is_superadmin = 1'
+      ).first();
+      if (superadminCount?.cnt <= 1 && user.is_superadmin) {
+        return Response.json({ error: 'Cannot revoke the last superadmin' }, { status: 400, headers: corsHeaders });
+      }
+    }
     await env.DB.prepare('UPDATE users SET is_superadmin = ? WHERE id = ?').bind(is_superadmin ? 1 : 0, userId).run();
   }
 
