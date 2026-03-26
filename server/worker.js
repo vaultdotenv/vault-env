@@ -16,6 +16,7 @@ import { dashboardListOrgs, dashboardCreateOrg, dashboardGetOrg, dashboardListOr
 import { dashboardGetPlan, dashboardUpgradePlan, dashboardCreateRevealToken, handleRevealTokenValidate } from './handlers/billing.js';
 import { handleAdmin } from './handlers/admin.js';
 import { handleMfa, mfaChallenge } from './handlers/mfa.js';
+import { createCheckoutSession, createPortalSession, handleStripeWebhook } from './handlers/stripe.js';
 
 const CORS_HEADERS = {
   'Access-Control-Allow-Origin': '*',
@@ -86,6 +87,11 @@ export default {
         return handleCliAuthPoll(env, code, corsHeaders);
       }
 
+      // ── Stripe Webhook (signature auth, not session) ────────────────────
+      if (path === '/api/v1/stripe/webhook' && request.method === 'POST') {
+        return handleStripeWebhook(request, env, corsHeaders);
+      }
+
       // ── Dashboard API (session auth) ───────────────────────────────────
       if (path.startsWith('/api/v1/dashboard/')) {
         return handleDashboardRoutes(request, env, corsHeaders, path);
@@ -144,6 +150,12 @@ async function handleDashboardRoutes(request, env, corsHeaders, path) {
   }
   if (path === '/api/v1/dashboard/plan/upgrade' && method === 'POST') {
     return dashboardUpgradePlan(request, env, user, corsHeaders);
+  }
+  if (path === '/api/v1/dashboard/plan/checkout' && method === 'POST') {
+    return createCheckoutSession(request, env, user, corsHeaders);
+  }
+  if (path === '/api/v1/dashboard/plan/portal' && method === 'POST') {
+    return createPortalSession(request, env, user, corsHeaders);
   }
 
   // ── Admin ──────────────────────────────────────────────────────────────
