@@ -13,14 +13,20 @@ function getDashboardUrl(env) {
   return env.DASHBOARD_URL || DEFAULT_DASHBOARD_URL;
 }
 
-const PRICE_MAP = {
-  pro: 'price_1TF1j8IRrTIgf1hhxgTiFNjF',
-  team: 'price_1TF1jXIRrTIgf1hhdxrXtDhM',
-};
+// Price IDs set via env vars (different for production vs staging)
+function getPriceMap(env) {
+  return {
+    pro: env.STRIPE_PRICE_PRO,
+    team: env.STRIPE_PRICE_TEAM,
+  };
+}
 
-const PRICE_TO_PLAN = Object.fromEntries(
-  Object.entries(PRICE_MAP).map(([plan, price]) => [price, plan])
-);
+function getPriceToPlan(env) {
+  const map = getPriceMap(env);
+  return Object.fromEntries(
+    Object.entries(map).map(([plan, price]) => [price, plan])
+  );
+}
 
 // ── Stripe REST helpers ─────────────────────────────────────────────────────
 
@@ -82,7 +88,8 @@ async function verifyWebhookSignature(payload, sigHeader, secret) {
 export async function createCheckoutSession(request, env, user, corsHeaders) {
   const { plan } = await request.json();
 
-  if (!plan || !PRICE_MAP[plan]) {
+  const priceMap = getPriceMap(env);
+  if (!plan || !priceMap[plan]) {
     return Response.json({ error: 'Invalid plan. Must be "pro" or "team".' }, { status: 400, headers: corsHeaders });
   }
 
@@ -105,7 +112,7 @@ export async function createCheckoutSession(request, env, user, corsHeaders) {
   const session = await stripeRequest(env, 'POST', '/checkout/sessions', {
     customer: customerId,
     mode: 'subscription',
-    'line_items[0][price]': PRICE_MAP[plan],
+    'line_items[0][price]': priceMap[plan],
     'line_items[0][quantity]': '1',
     success_url: `${getDashboardUrl(env)}/billing?success=true`,
     cancel_url: `${getDashboardUrl(env)}/billing?cancelled=true`,
@@ -215,7 +222,7 @@ async function handleSubscriptionUpdated(sub, env) {
   } else if (sub.status === 'active') {
     // Plan may have changed — check price
     const priceId = sub.items?.data?.[0]?.price?.id;
-    const plan = PRICE_TO_PLAN[priceId];
+    const plan = getPriceToPlan(env)[priceId];
     if (plan) {
       await syncPlan(env, user.id, plan);
     }

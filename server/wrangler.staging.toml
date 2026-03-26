@@ -4,6 +4,8 @@ compatibility_date = "2024-01-01"
 
 [vars]
 DASHBOARD_URL = "https://app-staging.vaultdotenv.io"
+STRIPE_PRICE_PRO = "price_1TF1j8IRrTIgf1hhxgTiFNjF"
+STRIPE_PRICE_TEAM = "price_1TF1jXIRrTIgf1hhdxrXtDhM"
 
 routes = [
   { pattern = "api-staging.vaultdotenv.io/*", zone_name = "vaultdotenv.io" }

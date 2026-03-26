@@ -7,6 +7,10 @@ routes = [
   { pattern = "vault.satinvoice.com/*", zone_name = "satinvoice.com" }
 ]
 
+[vars]
+STRIPE_PRICE_PRO = "price_1TF1xXEh5MxndipbfkiJuZYa"
+STRIPE_PRICE_TEAM = "price_1TF1xbEh5MxndipbqpWgW4qJ"
+
 [[d1_databases]]
 binding = "DB"
 database_name = "vault-db"
